@@ -44,9 +44,9 @@ const form = reactive({
   account: '',
   password: '',
   remark: '',
-  category: 'general',
-  expiryDays: 0, // 0表示永不过期
-  customExpiryDate: null // 自定义过期时间
+  categories: ['general'], // 支持多分类
+  expiryDays: 0,
+  customExpiryDate: null
 })
 
 // 过期天数选项
@@ -288,11 +288,22 @@ const fetchData = async () => {
   }
 }
 
+// 获取密码的分类列表（兼容旧数据）
+const getItemCategories = (item) => {
+  if (item.categories && Array.isArray(item.categories)) {
+    return item.categories
+  }
+  return item.category ? [item.category] : ['general']
+}
+
 const filteredItems = computed(() => {
   let result = items.value
   
   if (selectedCategory.value !== 'all') {
-    result = result.filter(item => item.category === selectedCategory.value)
+    result = result.filter(item => {
+      const cats = getItemCategories(item)
+      return cats.includes(selectedCategory.value)
+    })
   }
   
   if (searchQuery.value) {
@@ -313,7 +324,10 @@ const categoryStats = computed(() => {
     if (cat.value === 'all') {
       stats[cat.value] = items.value.length
     } else {
-      stats[cat.value] = items.value.filter(item => item.category === cat.value).length
+      stats[cat.value] = items.value.filter(item => {
+        const cats = getItemCategories(item)
+        return cats.includes(cat.value)
+      }).length
     }
   })
   return stats
@@ -330,7 +344,7 @@ const handleAdd = () => {
   form.account = ''
   form.password = ''
   form.remark = ''
-  form.category = 'general'
+  form.categories = ['general']
   form.expiryDays = 0
   form.customExpiryDate = null
   dialogVisible.value = true
@@ -343,11 +357,12 @@ const handleEdit = (row) => {
   form.account = row.account
   form.password = row.password
   form.remark = row.remark || ''
-  form.category = row.category || 'general'
+  // 兼容旧数据（单分类）和新数据（多分类）
+  form.categories = row.categories || (row.category ? [row.category] : ['general'])
   form.expiryDays = row.expiryDays || 0
   form.customExpiryDate = row.customExpiryDate || null
   if (row.customExpiryDate) {
-    form.expiryDays = -1 // 显示"自定义时间"选项
+    form.expiryDays = -1
   }
   dialogVisible.value = true
 }
@@ -710,13 +725,18 @@ onMounted(() => {
           >
             <div class="card-header">
               <div class="platform-info">
-                <div class="platform-avatar" :style="{ background: getCategoryColor(item.category) }">
+                <div class="platform-avatar" :style="{ background: getCategoryColor(getItemCategories(item)[0]) }">
                   {{ item.platform.charAt(0).toUpperCase() }}
                 </div>
                 <div class="platform-details">
                   <span class="platform-name">{{ item.platform }}</span>
                   <span class="platform-category">
-                    {{ getCategoryIcon(item.category) }} {{ categories.find(c => c.value === item.category)?.label || '通用' }}
+                    <template v-for="(cat, idx) in getItemCategories(item).slice(0, 2)" :key="cat">
+                      {{ getCategoryIcon(cat) }}{{ categories.find(c => c.value === cat)?.label || '通用' }}<template v-if="idx < Math.min(getItemCategories(item).length, 2) - 1">、</template>
+                    </template>
+                    <template v-if="getItemCategories(item).length > 2">
+                      +{{ getItemCategories(item).length - 2 }}
+                    </template>
                   </span>
                 </div>
               </div>
@@ -809,8 +829,15 @@ onMounted(() => {
           <el-input v-model="form.platform" placeholder="如：Google、淘宝" />
         </el-form-item>
         
-        <el-form-item label="分类" prop="category">
-          <el-select v-model="form.category" placeholder="选择分类" style="width: 100%">
+        <el-form-item label="分类（可多选）">
+          <el-select 
+            v-model="form.categories" 
+            multiple 
+            placeholder="选择分类" 
+            style="width: 100%"
+            collapse-tags
+            collapse-tags-tooltip
+          >
             <el-option 
               v-for="cat in categories.filter(c => c.value !== 'all')" 
               :key="cat.value" 
