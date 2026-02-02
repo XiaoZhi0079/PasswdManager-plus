@@ -59,11 +59,15 @@ export async function onRequest(context) {
     return errorResponse('Method not allowed', 405, 'METHOD_NOT_ALLOWED');
   }
 
+  // 调试：输出 env 中的所有绑定
+  const envKeys = env ? Object.keys(env) : [];
+  console.log('Available env bindings:', envKeys);
+
   // 检查 KV 绑定是否存在
   if (!env || !env.PASSWORD_KV) {
-    console.error('PASSWORD_KV binding is not configured');
+    console.error('PASSWORD_KV binding is not configured. Available bindings:', envKeys);
     return errorResponse(
-      '服务配置错误：KV 存储未绑定，请检查 Cloudflare Pages 的 KV 绑定配置',
+      `服务配置错误：KV 存储未绑定。当前可用绑定: [${envKeys.join(', ')}]`,
       500,
       'KV_NOT_BOUND'
     );
