@@ -45,6 +45,7 @@ const form = reactive({
   password: '',
   remark: '',
   category: 'general',
+  tags: [], // 多标签支持
   expiryDays: 0, // 0表示永不过期
   customExpiryDate: null // 自定义过期时间
 })
@@ -107,12 +108,91 @@ const categories = ref([
   { value: 'other', label: '其他', icon: '📌', isSystem: false }
 ])
 
+// 预设标签（可多选）
+const presetTags = ref([
+  { value: 'important', label: '重要', icon: '⭐', color: '#e6a23c' },
+  { value: 'personal', label: '个人', icon: '👤', color: '#409eff' },
+  { value: 'shared', label: '共享', icon: '👥', color: '#67c23a' },
+  { value: 'temporary', label: '临时', icon: '⏳', color: '#909399' },
+  { value: 'backup', label: '备用', icon: '💾', color: '#9c27b0' }
+])
+
 // 自定义标签相关
 const customCategoryDialogVisible = ref(false)
 const customCategoryForm = reactive({
   label: '',
   icon: '🏷️'
 })
+
+// 自定义标签（多选标签）
+const customTags = ref([])
+
+// 加载自定义标签
+const loadCustomTags = () => {
+  const saved = localStorage.getItem('pm_custom_tags')
+  if (saved) {
+    try {
+      customTags.value = JSON.parse(saved)
+    } catch (e) {}
+  }
+}
+
+// 保存自定义标签
+const saveCustomTags = () => {
+  localStorage.setItem('pm_custom_tags', JSON.stringify(customTags.value))
+}
+
+// 所有可用标签（预设 + 自定义）
+const allTags = computed(() => [...presetTags.value, ...customTags.value])
+
+// 添加自定义标签
+const addCustomTag = () => {
+  if (!customCategoryForm.label.trim()) {
+    ElMessage.warning('请输入标签名称')
+    return
+  }
+  
+  const value = 'tag_' + Date.now()
+  customTags.value.push({
+    value,
+    label: customCategoryForm.label.trim(),
+    icon: customCategoryForm.icon,
+    color: `hsl(${Math.random() * 360}, 60%, 50%)`
+  })
+  
+  saveCustomTags()
+  customCategoryDialogVisible.value = false
+  customCategoryForm.label = ''
+  customCategoryForm.icon = '🏷️'
+  ElMessage.success('标签添加成功')
+}
+
+// 删除自定义标签
+const deleteCustomTag = (tag) => {
+  ElMessageBox.confirm(
+    `确定要删除标签「${tag.label}」吗？`,
+    '删除标签',
+    { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+  ).then(() => {
+    const index = customTags.value.findIndex(t => t.value === tag.value)
+    if (index > -1) {
+      customTags.value.splice(index, 1)
+      saveCustomTags()
+      // 从所有密码中移除该标签
+      items.value.forEach(item => {
+        if (item.tags && item.tags.includes(tag.value)) {
+          item.tags = item.tags.filter(t => t !== tag.value)
+        }
+      })
+      ElMessage.success('标签已删除')
+    }
+  })
+}
+
+// 获取标签信息
+const getTagInfo = (tagValue) => {
+  return allTags.value.find(t => t.value === tagValue) || { label: tagValue, icon: '🏷️', color: '#909399' }
+}
 
 // 常用emoji列表
 const emojiList = [
@@ -331,6 +411,7 @@ const handleAdd = () => {
   form.password = ''
   form.remark = ''
   form.category = 'general'
+  form.tags = []
   form.expiryDays = 0
   form.customExpiryDate = null
   dialogVisible.value = true
@@ -344,6 +425,7 @@ const handleEdit = (row) => {
   form.password = row.password
   form.remark = row.remark || ''
   form.category = row.category || 'general'
+  form.tags = row.tags || []
   form.expiryDays = row.expiryDays || 0
   form.customExpiryDate = row.customExpiryDate || null
   if (row.customExpiryDate) {
@@ -487,6 +569,7 @@ const submitForm = async (formEl) => {
         const payload = { 
           ...form, 
           id: currentId.value,
+          tags: form.tags || [],
           expiryDays: form.expiryDays === -1 ? 0 : form.expiryDays,
           customExpiryDate: form.expiryDays === -1 ? form.customExpiryDate : null
         }
@@ -621,6 +704,7 @@ const getCategoryColor = (category) => {
 
 onMounted(() => {
   loadCustomCategories()
+  loadCustomTags()
   fetchData()
   // 恢复暗色模式设置
   const savedDarkMode = localStorage.getItem('pm_dark_mode')
@@ -786,6 +870,22 @@ onMounted(() => {
                   ⏰ {{ getExpiryStatus(item).label }}
                 </span>
               </div>
+
+              <!-- 多标签显示 -->
+              <div class="item-tags" v-if="item.tags && item.tags.length > 0">
+                <span 
+                  v-for="tagValue in item.tags" 
+                  :key="tagValue"
+                  class="item-tag"
+                  :style="{ 
+                    background: getTagInfo(tagValue).color + '20', 
+                    color: getTagInfo(tagValue).color,
+                    borderColor: getTagInfo(tagValue).color + '40'
+                  }"
+                >
+                  {{ getTagInfo(tagValue).icon }} {{ getTagInfo(tagValue).label }}
+                </span>
+              </div>
             </div>
           </div>
         </el-col>
@@ -818,6 +918,43 @@ onMounted(() => {
               :value="cat.value" 
             />
           </el-select>
+        </el-form-item>
+
+        <el-form-item label="标签（可多选）">
+          <el-select 
+            v-model="form.tags" 
+            multiple 
+            placeholder="选择标签" 
+            style="width: 100%"
+            collapse-tags
+            collapse-tags-tooltip
+          >
+            <el-option-group label="预设标签">
+              <el-option 
+                v-for="tag in presetTags" 
+                :key="tag.value" 
+                :label="tag.icon + ' ' + tag.label" 
+                :value="tag.value"
+              >
+                <span :style="{ color: tag.color }">{{ tag.icon }} {{ tag.label }}</span>
+              </el-option>
+            </el-option-group>
+            <el-option-group label="自定义标签" v-if="customTags.length > 0">
+              <el-option 
+                v-for="tag in customTags" 
+                :key="tag.value" 
+                :label="tag.icon + ' ' + tag.label" 
+                :value="tag.value"
+              >
+                <span :style="{ color: tag.color }">{{ tag.icon }} {{ tag.label }}</span>
+              </el-option>
+            </el-option-group>
+          </el-select>
+          <div class="tags-hint">
+            <el-button link size="small" @click="customCategoryDialogVisible = true">
+              + 添加自定义标签
+            </el-button>
+          </div>
         </el-form-item>
         
         <el-form-item label="账号/邮箱" prop="account">
@@ -1045,10 +1182,26 @@ onMounted(() => {
         <div class="preview-tag">
           预览：<span class="tag-preview">{{ customCategoryForm.icon }} {{ customCategoryForm.label || '标签名称' }}</span>
         </div>
+
+        <!-- 已有自定义标签列表 -->
+        <div class="existing-tags" v-if="customTags.length > 0">
+          <label>已有自定义标签</label>
+          <div class="tags-list">
+            <span 
+              v-for="tag in customTags" 
+              :key="tag.value"
+              class="existing-tag"
+              :style="{ background: tag.color + '20', color: tag.color }"
+            >
+              {{ tag.icon }} {{ tag.label }}
+              <span class="tag-remove" @click="deleteCustomTag(tag)">×</span>
+            </span>
+          </div>
+        </div>
       </div>
       <template #footer>
         <el-button @click="customCategoryDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="addCustomCategory">添加标签</el-button>
+        <el-button type="primary" @click="addCustomTag">添加标签</el-button>
       </template>
     </el-dialog>
   </div>
@@ -1641,6 +1794,78 @@ onMounted(() => {
   margin-left: 8px;
   color: var(--text-primary);
   font-weight: 500;
+}
+
+/* 多标签样式 */
+.item-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-color);
+}
+
+.item-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid;
+}
+
+.tags-hint {
+  margin-top: 4px;
+}
+
+/* 已有标签列表 */
+.existing-tags {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+.existing-tags label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.tags-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.existing-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.tag-remove {
+  cursor: pointer;
+  width: 16px;
+  height: 16px;
+  line-height: 14px;
+  text-align: center;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.1);
+  font-size: 12px;
+  margin-left: 2px;
+}
+
+.tag-remove:hover {
+  background: #f56c6c;
+  color: white;
 }
 
 /* 响应式 */
