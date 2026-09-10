@@ -1,38 +1,50 @@
 <script setup>
 import { ref, onMounted } from 'vue'
+import axios from 'axios'
+import { ElMessage } from 'element-plus'
 import LoginForm from './components/LoginForm.vue'
 import PasswordManager from './components/PasswordManager.vue'
 
-const authKey = ref('')
+const authenticated = ref(false)
+const checking = ref(true)
 const username = ref('')
 
-onMounted(() => {
-  const savedToken = localStorage.getItem('pm_token')
-  const savedUsername = localStorage.getItem('pm_username')
-  if (savedToken) {
-    authKey.value = savedToken
-    username.value = savedUsername || ''
-  }
+onMounted(async () => {
+  localStorage.removeItem('pm_token')
+  localStorage.removeItem('pm_username')
+  try {
+    const res = await axios.get('/api/auth')
+    handleLogin(res.data.data.username)
+  } catch (error) {
+    if (error.response?.status !== 401) ElMessage.error('无法确认登录状态，请稍后重试')
+  } finally { checking.value = false }
 })
 
-const handleLogin = (token, user) => {
-  authKey.value = token
-  localStorage.setItem('pm_token', token)
+const handleLogin = (user) => {
+  username.value = user
+  authenticated.value = true
 }
 
-const handleLogout = () => {
-  authKey.value = ''
+const clearSession = () => {
+  authenticated.value = false
   username.value = ''
   localStorage.removeItem('pm_token')
   localStorage.removeItem('pm_username')
   localStorage.removeItem('pm_dark_mode')
   document.documentElement.classList.remove('dark')
 }
+const handleLogout = async () => {
+  try {
+    await axios.post('/api/auth', { type: 'logout' }, { headers: { 'X-PM-Request': '1' } })
+    clearSession()
+  } catch { ElMessage.error('退出失败，会话尚未注销，请重试') }
+}
 </script>
 
 <template>
   <div class="app-root">
-    <LoginForm v-if="!authKey" @login="handleLogin" />
+    <div v-if="checking" role="status">正在确认登录状态…</div>
+    <LoginForm v-else-if="!authenticated" @login="handleLogin" />
     <div v-else class="app-layout">
       <header class="app-header">
         <div class="header-left">
@@ -62,7 +74,7 @@ const handleLogout = () => {
         </div>
       </header>
       <main class="app-main">
-        <PasswordManager :authKey="authKey" @logout="handleLogout" />
+        <PasswordManager @logout="clearSession" />
       </main>
     </div>
   </div>

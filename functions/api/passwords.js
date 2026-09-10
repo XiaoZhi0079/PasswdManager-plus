@@ -1,8 +1,10 @@
+import { mutationAllowed, readSession } from '../lib/security.js';
+
 // 统一响应格式
 const jsonResponse = (data, status = 200) => {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json' }
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }
   });
 };
 
@@ -72,65 +74,22 @@ async function decryptData(encryptedObj, encryptionKey, salt) {
     const decoder = new TextDecoder();
     return JSON.parse(decoder.decode(decrypted));
   } catch (e) {
-    return null;
+    throw new Error('VAULT_DECRYPT_FAILED');
   }
 }
 
 export async function onRequest(context) {
   const { request, env } = context;
   
-  const authHeader = request.headers.get('Authorization');
-  
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return errorResponse('未授权访问，请先登录', 401, 'UNAUTHORIZED');
+  if (request.method !== 'GET' && !mutationAllowed(request)) {
+    return errorResponse('请求来源或格式不受信任', 403, 'CSRF_REJECTED');
   }
-
-  const token = authHeader.split(' ')[1];
-  
-  if (!token || token.length < 10) {
-    return errorResponse('无效的认证令牌', 401, 'INVALID_TOKEN');
-  }
-  
-  // 检查 KV 绑定
-  if (!env || !env.PASSWORD_KV) {
-    console.error('PASSWORD_KV binding is not configured');
-    return errorResponse(
-      '服务配置错误：KV 存储未绑定，请检查 Cloudflare Pages 的 KV 绑定配置',
-      500,
-      'KV_NOT_BOUND'
-    );
-  }
-
-  // 验证会话并获取用户信息
+  if (!env?.PASSWORD_KV) return errorResponse('KV 存储未绑定', 500, 'KV_NOT_BOUND');
   let sessionData;
-  try {
-    sessionData = await env.PASSWORD_KV.get(`session:${token}`, { type: 'json' });
-  } catch (kvError) {
-    console.error('KV read error during session validation:', kvError);
-    return errorResponse('存储服务暂时不可用，请稍后重试', 503, 'KV_READ_ERROR');
-  }
-
-  let username;
-  let encryptionKey;
-  
-  if (sessionData && sessionData.username) {
-    // 新格式的会话数据
-    username = sessionData.username;
-    encryptionKey = sessionData.encryptionKey;
-  } else {
-    // 兼容旧格式（直接存储username字符串）
-    try {
-      username = await env.PASSWORD_KV.get(`session:${token}`);
-    } catch (kvError) {
-      console.error('KV read error during legacy session validation:', kvError);
-      return errorResponse('存储服务暂时不可用，请稍后重试', 503, 'KV_READ_ERROR');
-    }
-    
-    if (!username) {
-      return errorResponse('会话已过期或无效，请重新登录', 401, 'SESSION_EXPIRED');
-    }
-    encryptionKey = token; // 旧格式使用token作为加密密钥
-  }
+  try { sessionData = await readSession(request, env.PASSWORD_KV); }
+  catch { return errorResponse('会话服务暂时不可用', 503, 'KV_READ_ERROR'); }
+  if (!sessionData) return errorResponse('请重新登录', 401, 'SESSION_EXPIRED');
+  const { username, encryptionKey } = sessionData;
 
   const KEY = `data:${username}`;
   
@@ -144,11 +103,12 @@ export async function onRequest(context) {
   
   let userData;
   try {
-    userData = userDataStr ? JSON.parse(userDataStr) : { salt: 'default-salt' };
+    userData = userDataStr ? JSON.parse(userDataStr) : null;
   } catch (parseError) {
     console.error('User data parse error:', parseError);
-    userData = { salt: 'default-salt' };
+    return errorResponse('用户数据损坏', 500, 'DATA_CORRUPTED');
   }
+  if (!userData || typeof userData.salt !== 'string') return errorResponse('用户数据损坏', 500, 'DATA_CORRUPTED');
   const salt = userData.salt;
 
   try {

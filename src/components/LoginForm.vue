@@ -43,8 +43,9 @@ const handleSubmit = async () => {
     return
   }
 
-  if (form.password.length < 6) {
-    ElMessage.warning('密码至少6个字符')
+  const minLength = isRegister.value ? 12 : 6
+  if (form.password.length < minLength) {
+    ElMessage.warning(`密码至少${minLength}个字符`)
     return
   }
 
@@ -55,7 +56,7 @@ const handleSubmit = async () => {
       type,
       username: form.username,
       password: form.password
-    })
+    }, { headers: { 'X-PM-Request': '1' } })
 
     if (res.data.success) {
       if (isRegister.value) {
@@ -64,7 +65,8 @@ const handleSubmit = async () => {
         form.password = ''
       } else {
         ElMessage.success('登录成功')
-        emit('login', res.data.data.token)
+        form.password = ''
+        emit('login', res.data.data.username)
       }
     } else {
       ElMessage.error(res.data.message || '操作失败')
