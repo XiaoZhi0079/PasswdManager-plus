@@ -1,190 +1,63 @@
-// 统一响应格式
-const jsonResponse = (data, status = 200) => {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { 'Content-Type': 'application/json' }
-  });
-};
+import { json, sha256, passwordHash, equalHash, HASH_ITERATIONS, SESSION_TTL,
+  mutationAllowed, sessionToken, sessionCookie, readSession, allowAuthAttempt } from '../lib/security.js';
 
-// 错误响应
-const errorResponse = (message, status = 400, code = 'ERROR') => {
-  return jsonResponse({ success: false, message, code }, status);
-};
+const error = (message, status, code) => json({ success: false, message, code }, status);
 
-// 密码哈希函数
-const hashPassword = async (pwd, salt) => {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(pwd + salt);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-};
-
-// 生成加密密钥（基于密码派生，用于数据加密）
-const deriveEncryptionKey = async (pwd, salt) => {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(pwd + salt + 'encryption');
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-};
-
-// 验证用户名格式
-const validateUsername = (username) => {
-  if (typeof username !== 'string' || username.length < 3 || username.length > 50) {
-    return '用户名长度需在 3-50 个字符之间';
-  }
-  if (!/^[a-zA-Z0-9_\u4e00-\u9fa5]+$/.test(username)) {
-    return '用户名只能包含字母、数字、下划线和中文';
-  }
-  return null;
-};
-
-// 验证密码强度
-const validatePassword = (password) => {
-  if (typeof password !== 'string' || password.length < 6) {
-    return '密码长度至少 6 个字符';
-  }
-  if (password.length > 100) {
-    return '密码长度不能超过 100 个字符';
-  }
-  return null;
-};
-
-export async function onRequest(context) {
-  const { request, env } = context;
-  
-  // 检查请求方法
-  if (request.method !== 'POST') {
-    return errorResponse('Method not allowed', 405, 'METHOD_NOT_ALLOWED');
-  }
-
-  // 调试：输出 env 中的所有绑定
-  const envKeys = env ? Object.keys(env) : [];
-  console.log('Available env bindings:', envKeys);
-
-  // 检查 KV 绑定是否存在
-  if (!env || !env.PASSWORD_KV) {
-    console.error('PASSWORD_KV binding is not configured. Available bindings:', envKeys);
-    return errorResponse(
-      `服务配置错误：KV 存储未绑定。当前可用绑定: [${envKeys.join(', ')}]`,
-      500,
-      'KV_NOT_BOUND'
-    );
-  }
-
-  let body;
+export async function onRequest({ request, env }) {
+  if (!['GET', 'POST'].includes(request.method)) return error('Method not allowed', 405, 'METHOD_NOT_ALLOWED');
+  if (request.method === 'POST' && !mutationAllowed(request)) return error('请求来源或格式不受信任', 403, 'CSRF_REJECTED');
+  if (!env?.PASSWORD_KV) return error('服务配置错误：KV 存储未绑定', 500, 'KV_NOT_BOUND');
+  const kv = env.PASSWORD_KV;
   try {
-    body = await request.json();
-  } catch (e) {
-    return errorResponse('请求体格式错误，需要有效的 JSON', 400, 'INVALID_JSON');
-  }
-
-  const { type, username, password } = body;
-
-  // 验证必填字段
-  if (!username || !password) {
-    return errorResponse('用户名和密码不能为空', 400, 'MISSING_FIELDS');
-  }
-
-  // 验证用户名格式
-  const usernameError = validateUsername(username);
-  if (usernameError) {
-    return errorResponse(usernameError, 400, 'INVALID_USERNAME');
-  }
-
-  // 验证密码格式
-  const passwordError = validatePassword(password);
-  if (passwordError) {
-    return errorResponse(passwordError, 400, 'INVALID_PASSWORD');
-  }
-
-  const USER_KEY = `user:${username}`;
-
-  try {
+    if (request.method === 'GET') {
+      const session = await readSession(request, kv);
+      return session ? json({ success: true, data: { username: session.username } }) : error('请重新登录', 401, 'SESSION_EXPIRED');
+    }
+    let body;
+    try { body = await request.json(); } catch { return error('请求体格式错误', 400, 'INVALID_JSON'); }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return error('请求体格式错误', 400, 'INVALID_JSON');
+    const { type, username, password } = body;
+    if (type === 'logout') {
+      const token = sessionToken(request);
+      if (token) await kv.delete(`session:v2:${token}`);
+      return json({ success: true }, 200, { 'Set-Cookie': sessionCookie(request, '', 0) });
+    }
+    if (!['register', 'login'].includes(type)) return error('无效的操作类型', 400, 'INVALID_TYPE');
+    if (typeof username !== 'string' || !/^[a-zA-Z0-9_\u4e00-\u9fa5]{3,50}$/.test(username)) return error('用户名格式不正确', 400, 'INVALID_USERNAME');
+    const minLength = type === 'register' ? 12 : 6;
+    if (typeof password !== 'string' || password.length < minLength || password.length > 100) return error(`密码长度需为 ${minLength}-100 个字符`, 400, 'INVALID_PASSWORD');
+    if (!await allowAuthAttempt(request, kv, username)) return json({ success: false, message: '尝试过于频繁，请稍后重试', code: 'RATE_LIMITED' }, 429, { 'Retry-After': '900' });
+    const key = `user:${username}`;
+    const user = await kv.get(key, { type: 'json' });
     if (type === 'register') {
-      let existing;
-      try {
-        existing = await env.PASSWORD_KV.get(USER_KEY);
-      } catch (kvError) {
-        console.error('KV read error during registration:', kvError);
-        return errorResponse('存储服务暂时不可用，请稍后重试', 503, 'KV_READ_ERROR');
-      }
-
-      if (existing) {
-        return errorResponse('用户名已存在', 409, 'USER_EXISTS');
-      }
-
+      if (user) return error('用户名已存在', 409, 'USER_EXISTS');
       const salt = crypto.randomUUID();
-      const hash = await hashPassword(password, salt);
-
-      try {
-        await env.PASSWORD_KV.put(USER_KEY, JSON.stringify({ hash, salt, createdAt: Date.now() }));
-      } catch (kvError) {
-        console.error('KV write error during registration:', kvError);
-        return errorResponse('注册失败，存储服务暂时不可用', 503, 'KV_WRITE_ERROR');
-      }
-      
-      return jsonResponse({ success: true, message: '注册成功' });
+      const hash = await passwordHash(password, salt);
+      await kv.put(key, JSON.stringify({ hash, salt, algorithm: 'pbkdf2-sha256', iterations: HASH_ITERATIONS, createdAt: Date.now() }));
+      return json({ success: true, message: '注册成功' });
     }
-
-    if (type === 'login') {
-      let userDataStr;
-      try {
-        userDataStr = await env.PASSWORD_KV.get(USER_KEY);
-      } catch (kvError) {
-        console.error('KV read error during login:', kvError);
-        return errorResponse('存储服务暂时不可用，请稍后重试', 503, 'KV_READ_ERROR');
-      }
-
-      if (!userDataStr) {
-        return errorResponse('用户名或密码错误', 401, 'INVALID_CREDENTIALS');
-      }
-
-      let userData;
-      try {
-        userData = JSON.parse(userDataStr);
-      } catch (parseError) {
-        console.error('User data parse error:', parseError);
-        return errorResponse('用户数据损坏，请联系管理员', 500, 'DATA_CORRUPTED');
-      }
-
-      const hash = await hashPassword(password, userData.salt);
-
-      if (hash !== userData.hash) {
-        return errorResponse('用户名或密码错误', 401, 'INVALID_CREDENTIALS');
-      }
-
-      // 创建会话
-      const token = crypto.randomUUID();
-      const encryptionKey = await deriveEncryptionKey(password, userData.salt);
-      
-      try {
-        // 存储会话信息（包含加密密钥）
-        await env.PASSWORD_KV.put(`session:${token}`, JSON.stringify({
-          username,
-          encryptionKey,
-          createdAt: Date.now()
-        }), { expirationTtl: 86400 });
-      } catch (kvError) {
-        console.error('KV write error during session creation:', kvError);
-        return errorResponse('登录失败，会话创建失败', 503, 'SESSION_CREATE_ERROR');
-      }
-
-      return jsonResponse({ 
-        success: true, 
-        data: { token, username }
-      });
+    if (!user) {
+      await passwordHash(password, 'nonexistent-user');
+      return error('用户名或密码错误', 401, 'INVALID_CREDENTIALS');
     }
-
-    return errorResponse('无效的操作类型，请使用 register 或 login', 400, 'INVALID_TYPE');
-
-  } catch (err) {
-    console.error('Unexpected error in auth:', err);
-    return errorResponse(
-      '服务器内部错误，请稍后重试',
-      500,
-      'INTERNAL_ERROR'
-    );
+    if (typeof user.salt !== 'string' || typeof user.hash !== 'string' ||
+        (user.algorithm && (user.algorithm !== 'pbkdf2-sha256' || user.iterations !== HASH_ITERATIONS))) {
+      return error('用户数据格式不受支持', 500, 'DATA_CORRUPTED');
+    }
+    const hash = user.algorithm ? await passwordHash(password, user.salt) : await sha256(password + user.salt);
+    if (!equalHash(hash, user.hash)) return error('用户名或密码错误', 401, 'INVALID_CREDENTIALS');
+    if (!user.algorithm) {
+      // Preserve salt and vault key derivation so old ciphertext remains readable.
+      await kv.put(key, JSON.stringify({ ...user, hash: await passwordHash(password, user.salt), algorithm: 'pbkdf2-sha256', iterations: HASH_ITERATIONS }));
+    }
+    const token = crypto.randomUUID();
+    const encryptionKey = await sha256(password + user.salt + 'encryption');
+    const now = Date.now();
+    await kv.put(`session:v2:${token}`, JSON.stringify({ username, encryptionKey, createdAt: now, expiresAt: now + SESSION_TTL * 1000 }), { expirationTtl: SESSION_TTL });
+    const previous = sessionToken(request);
+    if (previous) await kv.delete(`session:v2:${previous}`);
+    return json({ success: true, data: { username } }, 200, { 'Set-Cookie': sessionCookie(request, token) });
+  } catch {
+    return error('认证服务暂时不可用，请稍后重试', 503, 'AUTH_SERVICE_ERROR');
   }
 }

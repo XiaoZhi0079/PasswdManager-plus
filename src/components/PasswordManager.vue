@@ -7,10 +7,6 @@ import {
 } from '@element-plus/icons-vue'
 import axios from 'axios'
 
-const props = defineProps({
-  authKey: String
-})
-
 const emit = defineEmits(['logout'])
 
 const items = ref([])
@@ -209,8 +205,13 @@ const rules = reactive({
 const api = axios.create({
   baseURL: '/api',
   headers: {
-    'Authorization': `Bearer ${props.authKey}`
+    'X-PM-Request': '1'
   }
+})
+
+api.interceptors.response.use(response => response, error => {
+  if (error.response?.status === 401) emit('logout')
+  return Promise.reject(error)
 })
 
 // 密码强度计算
